@@ -19,25 +19,26 @@
     - [2.2 命令模式的基本概念](#22-命令模式的基本概念)
     - [2.3 第一步：定义命令对象](#23-第一步定义命令对象)
     - [2.4 第二步：定义命令处理器](#24-第二步定义命令处理器)
-    - [2.5 第三步：重构 Controller（采用标准 HTTP 语义）](#25-第三步重构-controller采用标准-http-语义)
-    - [2.6 我们获得了什么？](#26-我们获得了什么)
-    - [2.7 实战：命令验证（组合建议）](#27-实战命令验证组合建议)
-      - [可视化：写/读路径时序图](#可视化写读路径时序图)
-    - [2.8 小结](#28-小结)
-  - [第三章：中介者/命令总线 - 统一命令调度（强类型单播）](#第三章中介者命令总线---统一命令调度强类型单播)
-    - [3.1 当前代码的问题](#31-当前代码的问题)
-    - [3.2 命令(Command) vs 事件(Event)：为何不混用？](#32-命令command-vs-事件event为何不混用)
-    - [3.3 第一步：定义强类型命令与处理器](#33-第一步定义强类型命令与处理器)
-    - [3.4 第二步：实现强类型命令总线（单播、可返回值）](#34-第二步实现强类型命令总线单播可返回值)
-    - [3.5 第三步：实现命令处理器（应用服务）](#35-第三步实现命令处理器应用服务)
-    - [3.6 重构后的 Controller（依赖 CommandBus 与 QueryService）](#36-重构后的-controller依赖-commandbus-与-queryservice)
-    - [3.7 横切关注点：拦截器/AOP](#37-横切关注点拦截器aop)
-    - [3.8 处理查询（CQRS）](#38-处理查询cqrs)
-    - [3.9 项目结构建议](#39-项目结构建议)
-      - [可视化：分层与依赖方向](#可视化分层与依赖方向)
-    - [3.10 小结](#310-小结)
-    - [3.11 下一步](#311-下一步)
-    - [3.12 当前边界](#312-当前边界)
+    - [2.5 第三步：重构 Controller](#25-第三步重构-controller)
+    - [2.6 小结：我们获得了什么？](#26-小结我们获得了什么)
+  - [第三章：中介者/命令总线 - 统一命令调度](#第三章中介者命令总线---统一命令调度)
+    - [3.1 命令(Command) vs 事件(Event)](#31-命令command-vs-事件event)
+    - [3.2 简单实现命令总线](#32-简单实现命令总线)
+      - [3.2.1 第一步：定义强类型命令与处理器](#321-第一步定义强类型命令与处理器)
+      - [3.2.2 第二步：实现强类型命令总线（单播、可返回值）](#322-第二步实现强类型命令总线单播可返回值)
+      - [3.2.3 第三步：实现命令处理器（应用服务）](#323-第三步实现命令处理器应用服务)
+    - [3.3 重构后的 Controller](#33-重构后的-controller)
+    - [3.4 架构图发生的变化](#34-架构图发生的变化)
+    - [3.5 实战：命令验证](#35-实战命令验证)
+      - [3.5.1 在命令对象上声明约束](#351-在命令对象上声明约束)
+      - [3.5.2 在 CommandBus 中调用 Validator](#352-在-commandbus-中调用-validator)
+      - [3.5.3 异常到 HTTP 的映射](#353-异常到-http-的映射)
+      - [3.5.4 装饰器/中间件式 CommandBus（可插拔）](#354-装饰器中间件式-commandbus可插拔)
+      - [3.5.5 测试：独立验证命令](#355-测试独立验证命令)
+    - [3.6 小结：命令模式把问题**全部**解决了吗？](#36-小结命令模式把问题全部解决了吗)
+  - [第四章：CQRS - 读写职责分离](#第四章cqrs---读写职责分离)
+    - [4.11 下一步](#411-下一步)
+    - [4.12 当前边界](#412-当前边界)
 <!-- /TOC -->
 
 ## 适用人群
@@ -367,11 +368,10 @@ public void adjustInventory(String productId, Integer quantity, ...) {
 
 通过以上场景，我们发现传统 MVC 架构在项目演进过程中的问题：
 
-1. **职责边界模糊**：Controller 和 Service 的职责不清晰，导致代码混乱
-2. **无法阻止不良实践**：架构上没有约束，容易在 Controller 里写业务逻辑
-3. **紧耦合**：Controller 直接依赖 Service，修改困难
-4. **横切关注点难以统一处理**：日志、权限、监控等需要重复编写
-5. **查询和命令混为一谈**：没有区分读写操作的不同特点
+1. **无法阻止不良实践**：架构上没有约束，容易在 Controller 里写业务逻辑
+2. **紧耦合**：Controller 直接依赖 Service，一旦修改，影响面大
+3. **横切关注点难以统一处理**：日志、权限、监控等需要重复编写
+4. **查询和命令混为一谈**：没有区分读写操作的不同特点
 
 **好消息是**：我们不需要一次性推翻重来，可以通过渐进式的改进逐步解决这些问题。
 
@@ -391,23 +391,16 @@ productService.adjustInventory(productId, quantity, warehouse, reason);
 
 这种调用方式有什么问题？
 
-1. **参数列表冗长**：方法参数越来越多（实际项目中经常有 7-8 个参数）
-2. **业务意图不清晰**：`adjustInventory` 只是方法名，无法表达完整的业务含义
-3. **难以扩展**：增加新参数需要修改方法签名
-4. **难以追踪**：无法记录"谁在什么时候发起了这个操作"
+1. **参数列表冗长**：方法参数越来越多（实际项目中经常有 7-8 个参数），一来产生传参时的顺序问题，二来增加参数需要修改接口定义和所有调用方。在某些对代码质量要求非常高的团队，参数列表甚至会要求不超过 2 个，只有在极端情况下才允许 3 个参数以确保杜绝顺序问题。虽然使用命名参数（productId=..., quantity=...）也可以解决顺序问题，但同时命名参数使得代码变得冗长，而且解决不了修改参数时需要牵扯所有调用方的问题（而且java 还没有原生支持命名参数）。因此，我们通常采用参数包的方式来解决这个问题，即将多个参数封装到一个对象中传递。
+2. **难以追踪**：无法记录"谁在什么时候发起了这个操作"。在现代应用中，审计日志和操作日志是非常重要的需求，但如果Controller是使用调用函数的方式去执行业务逻辑，那要么开发者愿意在每个业务逻辑的调用点手动添加日志代码，要么用更重量级的拦截器等方案实现日志记录。各种在这方面找补的方案都有哪些弊端此处不再赘述，但我们应该意识到像日志这样的重点需求，应该在架构层面予以支持，依赖开发者自觉或后期打补丁的方式都只能证明架构设计在一开始的设计不周。理想情况下，我们希望有一种自动化日志记录的机制，能够在不修改业务代码的情况下，统一记录所有的业务操作。而且，为了保证日志的逻辑一致性，这些日志的记录时机应该是一致的：比如在收到请求时，统一记录请求的元信息（用户、时间、请求参数等）；再比如在执行业务逻辑时，统一记录操作的元信息（操作类型、参数等）。这就是AOP所说的"横切关注点"。更加显而易见的是，横切关注点最好能正好卡在架构的分层边界上以避免产生任何侵入性：如果Controller负责接收请求，Service负责执行业务逻辑，那么操作的日志记录就应该发生在Controller和Service之间，就像是我们在中间插入了一层中间层。这层中间层在代码里是不存在的，但在架构设计上是明确的。因此，为了支持这样的架构设计，接口层必须和业务逻辑层完全解耦，在代码上不产生任何依赖关系，从而在架构上形成两个层之间明确的边界。但当两个层完全解耦之后，接口层就无法直接调用业务逻辑层的方法了，这时我们需要一种新的方式来执行业务逻辑，即**命令模式**。
 
 ### 2.2 命令模式的基本概念
 
-**命令模式**（Command Pattern）将一个请求封装为一个对象，从而让你可以：
-- 用不同的请求对客户进行参数化
-- 对请求排队或记录请求日志
-- 支持可撤销的操作
+从类比的角度来看，前端通过http请求调用后端接口，这个过程本质上就是一种"命令"的发送和执行过程。http请求无非是一个内容复杂的参数包，后端接口层拿到这个参数包后，将其转换为后端需要实际处理的数据。正是由于这种"命令"的概念，前后端分离架构才能得以实现。因此，我们可以说使用命令模式来解耦层与层之间的调用关系是已经实际使用了几十年的成熟架构设计。
 
-在我们的场景中，一个"命令"代表一个完整的业务意图。
+前端和后端可以用命令模式分离，接口层和业务逻辑层同样可以用命令模式分离。而我们要做的有三件事：定义如同“http请求”一样的命令对象，定义“业务层的controller”来处理命令对象（显而易见，既然这个controller是用来处理命令的，它应该有一个新名字，我们叫它CommandController，命令处理器），最后重构接口层把函数调用改成发送“命令”。
 
 ### 2.3 第一步：定义命令对象
-
-将方法调用转换为命令对象：
 
 ```java
 /**
@@ -435,6 +428,8 @@ public record AdjustInventoryCommand(
 **命令对象的设计原则：**
 - ✅ 只包含数据字段，其他什么都不包含，作为纯粹的参数包，承载业务意图
 - ✅ 所有字段都是 final 的（Record 默认就是）
+
+这里，我们定义了一个 `AdjustInventoryCommand`，但实际项目中的命令设计会远比这复杂得多。就像http请求由各种方法（GET/POST/PUT/DELETE）、路径、查询参数、请求体等组成一样，命令对象也会根据业务需求包含各种字段和嵌套结构，显而易见的就是所有命令都需要携带“发起人”“时间戳”等元信息以支持审计日志等需求，有用户系统的项目还需要携带“用户ID”“权限信息”等等。这些非常通用的字段一般是直接写在架构里作为ICommand接口的默认字段，让其他命令继承即可。等到后期章节我们细看Wow框架时，会看到Wow为命令准备的海量元信息字段。
 
 ### 2.4 第二步：定义命令处理器
 
@@ -484,7 +479,7 @@ public class AdjustInventoryCommandHandler {
                     inventory.getQuantity(), command.quantity())
             );
         }
-        
+
         inventory.setQuantity(newQuantity);
         inventory.setLastModified(LocalDateTime.now(clock));
         inventoryRepository.save(inventory);
@@ -514,12 +509,9 @@ public class AdjustInventoryCommandHandler {
 }
 ```
 
-### 2.5 第三步：重构 Controller（采用标准 HTTP 语义）
-
-现在 Controller 变得非常简洁：写操作通过 JSON 请求体承载参数，避免使用 Query Param；成功且无负载时返回 204。
+### 2.5 第三步：重构 Controller
 
 ```java
-// 写请求 DTO（请求体）
 public record AdjustInventoryRequest(
     Integer quantity,
     String warehouse,
@@ -539,8 +531,9 @@ public class ProductController {
     @PostMapping("/{productId}/inventory")
     public ResponseEntity<Void> adjustInventory(
         @PathVariable UUID productId,
-            @RequestBody AdjustInventoryRequest body) {
-
+        @RequestBody AdjustInventoryRequest body) {
+        
+        // 从函数调用变成命令发送
         AdjustInventoryCommand command = new AdjustInventoryCommand(
             productId, body.quantity(), body.warehouse(), body.reason()
         );
@@ -554,210 +547,53 @@ public class ProductController {
 }
 ```
 
-### 2.6 我们获得了什么？
+### 2.6 小结：我们获得了什么？
 
 对比重构前后：
 
 | 方面 | 重构前 | 重构后 |
 |------|--------|--------|
-| **业务意图** | 方法调用，意图隐藏在参数中 | 命令对象，清晰表达业务意图 |
-| **参数传递** | 多个参数，容易出错 | 单个命令对象，类型安全 |
+| **业务意图** | 方法调用 | 命令对象 |
+| **参数传递** | 多个参数 | 单个命令对象 |
 | **可测试性** | 需要 Mock Service | 直接测试 CommandHandler |
-| **可追踪性** | 难以记录操作历史 | 通过审计日志或领域事件记录操作历史（推荐记录领域事件） |
+| **可追踪性** | 难以记录操作历史 | 通过审计日志记录历史 |
 | **扩展性** | 修改方法签名影响所有调用方 | 在命令中添加字段，向后兼容 |
 
-### 2.7 实战：命令验证（组合建议）
-
-#### 可视化：写/读路径时序图
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User/Client
-    participant C as REST Controller
-    participant B as CommandBus
-    participant H as CommandHandler
-    participant R as Repository
-    participant DB as DB
-
-    Note over U,C: 写路径（命令）
-    U->>C: POST /api/products/{id}/inventory (body)
-    C->>B: send(AdjustInventoryCommand)
-    B->>H: dispatch(command)
-    H->>R: findById(productId)
-    R->>DB: SELECT ...
-    DB-->>R: Product/Inventory
-    H->>H: 业务规则校验
-    H->>R: save(inventory)
-    R->>DB: UPDATE/INSERT ...
-    H-->>B: Void
-    B-->>C: Void
-    C-->>U: 204 No Content
-
-    Note over U,C: 读路径（查询）
-    U->>C: GET /api/products/{id}
-    C->>+QS: productQueryService.getById(id)
-    QS->>R: load projection / dto
-    R->>DB: SELECT ... (可缓存/只读库)
-    DB-->>R: ProductRow
-    R-->>QS: ProductDto
-    QS-->>C: ProductDto
-    C-->>U: 200 OK + ProductDto
-```
-
-
-命令对象应保持数据载体的纯净性，同时采用“分层协作”的组合校验：
-- 结构/语法层校验：在命令或请求 DTO 上使用 Bean Validation 注解（如 @NotNull、@Size、@Pattern），由全局校验机制统一触发；
-- 领域不变量：后续章节将下沉到聚合/值对象内部维护（例如数量范围、不可为负等）；
-- 应用层跨聚合/外部依赖校验：放在专用 Validator 中集中处理。
-
-示例：在命令上添加基础注解，并保留应用层验证器处理跨聚合规则。
-
-```java
-// 命令添加基础的结构性约束（也可放在请求 DTO 上）
-public record AdjustInventoryCommand(
-    @NotNull UUID productId,
-    @NotNull Integer quantity,
-    @NotBlank @Pattern(regexp = "^[A-Z]{2}\\d{3}$") String warehouse,
-    String reason
-) implements Command<Void> {}
-
-/**
- * 调整库存命令验证器（示例：处理跨聚合/外部依赖校验）
- */
-@Component
-public class AdjustInventoryCommandValidator {
-    public void validate(AdjustInventoryCommand command) {
-        List<String> errors = new ArrayList<>();
-        // 示例：非结构性业务规则（此类规则后续将逐步下沉到领域模型）
-        if (command.quantity() != null && command.quantity() == 0) {
-            errors.add("调整数量不能为0");
-        }
-        if (command.quantity() != null &&
-            (command.quantity() < -10000 || command.quantity() > 10000)) {
-            errors.add("单次调整数量必须在 -10000 到 10000 之间");
-        }
-        if (!errors.isEmpty()) {
-            throw new ValidationException(String.join("; ", errors));
-        }
-    }
-}
-
-// 在 CommandHandler 中应用校验（结构性校验通常由 Bean Validation 自动触发）
-@Component
-public class AdjustInventoryCommandHandler 
-        implements CommandHandler<AdjustInventoryCommand> {
-    
-    private final AdjustInventoryCommandValidator validator;
-    private final ProductRepository productRepository;
-    private final InventoryRepository inventoryRepository;
-    private final Clock clock; // 通过 Clock 保持可测性
-    
-    public AdjustInventoryCommandHandler(
-            AdjustInventoryCommandValidator validator,
-            ProductRepository productRepository,
-            InventoryRepository inventoryRepository,
-            Clock clock) {
-        this.validator = validator;
-        this.productRepository = productRepository;
-        this.inventoryRepository = inventoryRepository;
-        this.clock = clock;
-    }
-    
-    @Override
-    @Transactional
-    public void handle(AdjustInventoryCommand command) {
-        validator.validate(command);
-        // ... 执行业务逻辑
-        // 提示：生产环境建议采用 Outbox Pattern 处理对外副作用，本文不展开
-    }
-}
-```
-
-### 2.8 小结
-
-通过引入命令模式，我们实现了：
-
-✅ **业务意图显式化**：命令对象清晰表达业务操作  
-✅ **职责分离**：Controller 负责协调，CommandHandler 负责业务逻辑  
-✅ **类型安全**：编译期检查，减少运行时错误  
-✅ **便于测试**：命令和处理器都是 POJO，易于单元测试  
-
-但是，我们还有问题：
-- Controller 需要注入所有 CommandHandler，耦合度高
-- 没有统一的命令执行入口
-- 缺少横切关注点（日志、权限、事务）的统一处理
-
-**下一章**，我们将引入中介者模式（Mediator）解决这些问题。
+到这里，我们已经初步实现了命令模式的引入，但眼下的代码显然没有达成我们预期的解耦效果：因为我们有一件事还没有做，那就是**统一的命令调度器**，也就是所谓的**命令总线（Command Bus）**。当前端往后端发送请求时，http请求是整个互联网的基础设施帮我们调度的，而在后端，命令如何从Controller传递到CommandHandler，需要我们自己提供调度器来完成。如果业务需求对命令调度的关注度不高，我们可以把命令总线写的比较简单，并内嵌在框架里；但如果业务对命令调度有较高的要求，比如我希望在监控系统里可视化的看到每个命令的执行情况，或者由于业务特殊，当命令出现问题（比如库存不足）时，运维人员可以直接在后台系统里重新调度命令（而不是让用户重新发起请求），那么我们就需要一个功能更强大的命令总线，这时候由于命令总线本身承担了大量业务职责，我们可以单独写一套命令总线系统，作为某种基础设施服务来使用。当然，后者的实现对于本文档来说过于复杂，我们在接下来只用一个简单的命令总线来说明问题。
 
 ---
 
-## 第三章：中介者/命令总线 - 统一命令调度（强类型单播）
+## 第三章：中介者/命令总线 - 统一命令调度
 
 你知道吗，笔者完全不愿意写这一章，因为.net程序员有 MediatR 可用……
 
-于是，只好自己动手实现一个简单的命令总线（Command Bus），用于说明其存在的必要性。
+但由于本文档的背景是java，只好自己动手实现一个简单的命令总线（Command Bus），用于说明其存在的必要性。
 
-### 3.1 当前代码的问题
+### 3.1 命令(Command) vs 事件(Event)
 
-随着业务增长，我们有了越来越多的命令：
+熟悉事件驱动架构的读者可能会问，为什么不直接用 Spring 的 ApplicationEvent 来做命令调度呢？毕竟 Spring ApplicationEvent 本质上也是一种发布-订阅（Pub/Sub）模式的实现，完全可以用来传递命令对象。
 
-```java
-@RestController
-@RequestMapping("/api/products")
-public class ProductController {
-    
-    // ❌ 需要注入大量 CommandHandler
-    private final AdjustInventoryCommandHandler adjustInventoryHandler;
-    private final CreateProductCommandHandler createProductHandler;
-    private final UpdateProductCommandHandler updateProductHandler;
-    private final DeleteProductCommandHandler deleteProductHandler;
-    private final TransferInventoryCommandHandler transferInventoryHandler;
+**答案：**
+1. **单播 vs 多播**：命令是单播的，意味着每个命令只会被一个处理器处理；而事件是多播的，可能会被多个监听器处理。
+2. **返回值**：命令通常需要返回处理结果或错误信息，而事件则不需要关注返回值。
+3. **处理顺序**：命令的处理顺序是确定的，而事件的处理顺序可能会受到并发和异步的影响。
 
-    public ProductController(
-            AdjustInventoryCommandHandler adjustInventoryHandler,
-            CreateProductCommandHandler createProductHandler,
-            UpdateProductCommandHandler updateProductHandler,
-            DeleteProductCommandHandler deleteProductHandler,
-            TransferInventoryCommandHandler transferInventoryHandler
-            ) {
-        this.adjustInventoryHandler = adjustInventoryHandler;
-        this.createProductHandler = createProductHandler;
-        this.updateProductHandler = updateProductHandler;
-        this.deleteProductHandler = deleteProductHandler;
-        this.transferInventoryHandler = transferInventoryHandler;
-    }
-    // ... 更多 Handler
-    
-    
-    @PostMapping("/{productId}/inventory")
-    public ResponseEntity<Void> adjustInventory(...) {
-        adjustInventoryHandler.handle(command);  // 直接调用
-        return ResponseEntity.noContent().build();
-    }
-    
-    // ... 更多方法
-}
-```
+从根本上来说，“命令”所表达的是“意图”，当一个命令被new出来时，它代表着“我要做某事”，这件事**必须**被处理器处理并返回结果；而“事件”所表达的是“事实”，当一个事件被发布时，它代表着“某事已经发生了”，这件事可能会被多个监听器关注和处理，但不要求任何监听器必须处理它。
 
-**问题：**
-1. Controller 与大量 CommandHandler 耦合
-2. 每增加一个命令，都要修改 Controller 构造器
-3. 无法统一处理横切关注点（日志、权限、性能监控等）
+命令和事件的日志记录也各有用处，当开发者拿到命令日志时，可以清晰地看到“谁在什么时候发起了什么操作”，从而追踪用户行为；而事件日志则可以帮助开发者了解系统内部发生了什么变化，便于调试和监控，在后期章节我们还能看到Wow框架的事件溯源机制，看看当我们把事件驱动架构用到极致时，会发生什么有趣的事情。
 
-### 3.2 命令(Command) vs 事件(Event)：为何不混用？
+### 3.2 简单实现命令总线
 
-命令应被且仅被一个处理器处理（单播）、通常需要同步返回结果或直接暴露失败；而 Spring ApplicationEvent 是“多播通知”，无法天然保证唯一处理与返回值，且在并发与事务时序上容易引入不确定性。因此，推荐采用“强类型、单播、可返回值”的命令总线实现。
+本章不想看可以跳过，就算看了也意义不大，因为全是大模型生成的代码，完全是因为必须有这一章，才有的这一章。一个“进程内、同步、单播”的中介者已经足以用来说明问题。
 
-### 3.3 第一步：定义强类型命令与处理器
+#### 3.2.1 第一步：定义强类型命令与处理器
 
 ```java
 /** 命令：带返回值类型参数 R */
 public interface Command<R> {}
 
-/** 处理器：每种命令唯一处理器 */
+/** 处理器：每种命令唯一处理器（类型由泛型 C 推断，无需手写 supports） */
 public interface CommandHandler<C extends Command<R>, R> {
-    Class<C> supports();
     R handle(C command);
 }
 
@@ -766,19 +602,29 @@ public record AdjustInventoryCommand(UUID productId, Integer quantity, String wa
         implements Command<Void> {}
 ```
 
-### 3.4 第二步：实现强类型命令总线（单播、可返回值）
+#### 3.2.2 第二步：实现强类型命令总线（单播、可返回值）
 
 ```java
+import org.springframework.core.ResolvableType;
+
 @Component
 public class CommandBus {
-    private final Map<Class<?>, CommandHandler<?, ?>> registry = new ConcurrentHashMap<>();
+    private final Map<Class<?>, CommandHandler<?, ?>> registry;
 
     public CommandBus(List<CommandHandler<?, ?>> handlers) {
+        Map<Class<?>, CommandHandler<?, ?>> map = new HashMap<>();
         for (CommandHandler<?, ?> h : handlers) {
-            registry.merge(h.supports(), h, (a, b) -> {
-                throw new IllegalStateException("命令处理器重复: " + a + " vs " + b);
-            });
+            Class<?> cmdType = ResolvableType
+                .forClass(CommandHandler.class, h.getClass())
+                .resolveGeneric(0); // 解析 C 的实际类型
+            if (cmdType == null) {
+                throw new IllegalStateException("无法解析命令类型: " + h.getClass());
+            }
+            if (map.putIfAbsent(cmdType, h) != null) {
+                throw new IllegalStateException("命令处理器重复: " + cmdType.getName());
+            }
         }
+        this.registry = Map.copyOf(map); // 不可变映射
     }
 
     @SuppressWarnings("unchecked")
@@ -792,7 +638,7 @@ public class CommandBus {
 }
 ```
 
-### 3.5 第三步：实现命令处理器（应用服务）
+#### 3.2.3 第三步：实现命令处理器（应用服务）
 
 ```java
 @Component
@@ -811,9 +657,6 @@ public class AdjustInventoryCommandHandler implements CommandHandler<AdjustInven
         this.inventoryLogRepository = inventoryLogRepository;
         this.clock = clock;
     }
-
-    @Override
-    public Class<AdjustInventoryCommand> supports() { return AdjustInventoryCommand.class; }
 
     @Override
     @Transactional
@@ -845,11 +688,10 @@ public class AdjustInventoryCommandHandler implements CommandHandler<AdjustInven
             LocalDateTime.now(clock)
         );
         inventoryLogRepository.save(log);
-        // 提示：生产环境建议使用 Outbox Pattern 将领域事件/外部通知异步转发
         return null;
     }
 
-    private Inventory createNewInventory(String productId, String warehouse) {
+    private Inventory createNewInventory(UUID productId, String warehouse) {
         Inventory inventory = new Inventory();
         inventory.setId(UUID.randomUUID());
         inventory.setProductId(productId);
@@ -861,14 +703,11 @@ public class AdjustInventoryCommandHandler implements CommandHandler<AdjustInven
 }
 ```
 
-并发一致性提醒：库存等“可变计数”类命令应考虑唯一约束与乐观锁，并设计失败重试或幂等键；
+### 3.3 重构后的 Controller
 
-### 3.6 重构后的 Controller（依赖 CommandBus 与 QueryService）
-
-现在 Controller 变得极其简洁：
+现在，所有的接口都只有一个依赖：CommandBus。都只做一个简单操作：把请求转换成命令并发送出去。
 
 ```java
-
 @RestController
 @RequestMapping("/api/products")
 public class ProductController {
@@ -889,146 +728,284 @@ public class ProductController {
 }
 ```
 
-**对比之前的代码**：
-- ✅ 不再需要注入多个 CommandHandler
-- ✅ 新增命令无需修改 Controller
-- ✅ 代码非常简洁清晰
+### 3.4 架构图发生的变化
 
-### 3.7 横切关注点：拦截器/AOP
-
-通常情况下，我们希望在命令执行前后添加日志、权限校验、性能监控等横切关注点。可以通过“命令拦截器”实现，当然，这属于工程优化问题，跟本文的架构主题关系不大。当本文进度推进到一定阶段时，会对该问题进行考虑。
-
-### 3.8 处理查询（CQRS）
-
-查询通过 QueryService 实现:
-
-```java
-@RestController
-@RequestMapping("/api/products")
-public class ProductController {
-
-    private final ProductQueryService productQueryService; // 读侧依赖应用服务而非仓储
-
-    public ProductController(ProductQueryService productQueryService) {
-        this.productQueryService = productQueryService;
-    }
-
-    // 查询操作：通过 QueryService
-    @GetMapping("/{productId}")
-    public ResponseEntity<ProductDto> getProduct(@PathVariable UUID productId) {
-        ProductDto product = productQueryService.getById(productId);
-        return ResponseEntity.ok(product);
-    }
-}
-
-```
-
-以前的服务里怎么写查询，现在还怎么写查询，在这一章的重构中我们不关注这一点。
-
-### 3.9 项目结构建议
-
-此时，项目结构可以这样组织：
-
-```
-src/main/java/com/example/inventory/
-├── application/                    # 应用层（用例编排）
-│   ├── commands/                   # 命令定义（输入意图）
-│   │   ├── AdjustInventoryCommand.java
-│   │   ├── CreateProductCommand.java
-│   │   └── ...
-│   ├── handlers/                   # 命令处理器（应用服务）
-│   │   ├── AdjustInventoryCommandHandler.java
-│   │   ├── CreateProductCommandHandler.java
-│   │   └── ...
-│   ├── interceptors/               # 命令拦截器（日志/权限/度量）
-│   │   ├── LoggingInterceptor.java
-│   │   └── SecuredInterceptor.java
-│   └── CommandBus.java            # 命令总线（强类型单播）
-├── infrastructure/                 # 基础设施层
-│   └── persistence/
-│       ├── ProductRepository.java
-│       └── InventoryRepository.java
-├── controller/                     # 接口层（适配器）
-│   └── rest/
-│       ├── ProductController.java
-│       └── dto/
-│           ├── AdjustInventoryRequest.java
-│           └── ApiResponse.java
-└── domain/                         # 领域层，本文尚未推进到该部分，暂且略过
-```
-
-#### 可视化：分层与依赖方向
+在第一章开始之前，传统MVC架构大致是这样子的：
 
 ```mermaid
-flowchart TB
-    subgraph Interface[接口层]
-        Controller[REST Controller]
-        DTO[DTO / Request / Response]
-    end
-
-    subgraph Application[应用层]
-        CB[CommandBus]
-        CH[CommandHandlers]
-        QS[QueryService]
-        INT[Interceptors]
-    end
-
-    subgraph Domain[领域层]
-        AGG[Aggregates / Entities / Value Objects]
-        DS[Domain Services]
-        EV[Domain Events]
-    end
-
-    subgraph Infra[基础设施层]
-        REPO[Repositories]
-        DB[(Database)]
-        OUTBOX[(Outbox)]
-    end
-
-    Controller -->|发送命令/查询| CB
-    Controller -->|查询| QS
-    CB --> CH
-    CH --> REPO
-    REPO --> DB
-    CH --> OUTBOX
-    CH --> AGG
-    QS --> REPO
-    DTO --> Controller
+graph TD
+    A[User/Client] -->|HTTP Request| B[REST Controller]
+    B -->|调用方法执行业务| C[Service Layer]
+    C -->|调用方法| D[Repository Layer]
+    D -->|SQL| E[Database]
 ```
 
-### 3.10 小结
+而到3.3节重构完成后，一个简单的命令总线被引入，架构图变成了这样：
 
-通过采用强类型的命令总线与拦截器链，我们实现了：
+```mermaid
+graph TD
+    A[User/Client] -->|HTTP Request| B[REST Controller]
+    B -->|调用方法发送命令| C[CommandBus]
+    C -->|将命令分发给对应处理器| D[CommandHandler]
+    D -->|调用方法| E[Repository Layer]
+    E -->|SQL| F[Database]
+```
 
-✅ **解耦**：Controller 不再依赖具体的 CommandHandler  
-✅ **可扩展**：新增命令只需添加新的处理器  
-✅ **横切关注点集中处理**：通过多个拦截器实现日志、权限等  
-✅ **便于测试**：处理器与拦截器方法可以直接单元测试  
+从时序图的角度来看，在MVC架构中时序图大致是这样的：
 
-**对比传统方法的改进：**
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User/Client
+    participant C as REST Controller
+    participant S as Service Layer
+    participant R as Repository
+    participant DB as DB
 
-| 方面 | 传统 MVC | 引入命令模式后 |
-|------|----------|---------------|
-| **Controller 依赖** | 直接依赖多个 Service | 只依赖 CommandBus/QueryService |
-| **新增功能** | 修改 Controller 和 Service | 只需新增命令与处理器（应用服务） |
-| **横切关注点** | 在每个方法中重复编写 | 通过拦截器/AOP 统一处理 |
-| **代码行数** | Controller 臃肿 | Controller 简洁 |
-| **测试复杂度** | 需要 Mock 多个依赖 | 直接测试处理器与拦截器 |
+    U->>C: POST /api/products/{id}/inventory (body)
+    C->>S: adjustInventory(productId, quantity, warehouse, reason)
+    S->>R: findById(productId)
+    R->>DB: SELECT ...
+    DB-->>R: Product/Inventory
+    S->>R: save(inventory)
+    R->>DB: UPDATE/INSERT ...
+    S-->>C: Void
+    C-->>U: 204 No Content
+```
 
-**当前状态：**
-- ✅ Controller 职责清晰，只负责接收请求和发送命令
-- ✅ 命令与处理器通过命令总线解耦与调度
-- ✅ 横切关注点通过拦截器链集中处理
+而到3.3节重构完成后，时序图变成了这样：
 
-### 3.11 下一步
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User/Client
+    participant C as REST Controller
+    participant B as CommandBus
+    participant H as CommandHandler
+    participant R as Repository
+    participant DB as DB
 
-我们通过三个章节，将 Service 重构为“以用例为单位的应用服务（命令处理器）”，所有“命令”型操作都以接口层创建命令->发送命令->命令总线做验证、发日志、存记录等等等等->命令处理器执行业务逻辑的流程完成，所有“查询”型操作则变成了一个 QueryService ，还是经典而好用的 MVC 查询模式。
+    U->>C: POST /api/products/{id}/inventory (body)
+    C->>B: send(AdjustInventoryCommand)
+    B->>H: dispatch(command)
+    H->>R: findById(productId)
+    R->>DB: SELECT ...
+    DB-->>R: Product/Inventory
+    H->>R: save(inventory)
+    R->>DB: UPDATE/INSERT ...
+    H-->>B: Void
+    B-->>C: Void
+    C-->>U: 204 No Content
+```
+
+CommandBus 的引入，给我们提供了一个可以大展身手的切面，我们可以在 CommandBus 里实现各种横切关注点的处理，比如验证、日志、权限等，而不需要侵入业务代码。接下来，我们就在CommandBus里实际开发一下命令验证功能。
+
+### 3.5 实战：命令验证
+
+本节用 jakarta.validation.Validator（Bean Validation）来实现命令验证。
+
+#### 3.5.1 在命令对象上声明约束
+
+直接在 record 组件上标注约束即可。
+
+```java
+import jakarta.validation.constraints.*;
+
+/**
+ * 调整库存命令（示例）
+ * - 允许 quantity 为正（入库）或负（出库），但不允许为 0
+ */
+public record AdjustInventoryCommand(
+    @NotNull(message = "产品ID必填")
+    UUID productId,
+
+    @NotNull(message = "调整数量必填")
+    @NonZero // 自定义约束，示例见下
+    Integer quantity,
+
+    @NotBlank(message = "仓库编码必填")
+    @Size(max = 32, message = "仓库编码过长")
+    String warehouse,
+
+    @Size(max = 256, message = "原因过长")
+    String reason
+) implements Command<Void> {}
+```
+
+自定义一个“非零”约束：
+
+```java
+import jakarta.validation.Constraint;
+import jakarta.validation.Payload;
+import java.lang.annotation.*;
+
+@Documented
+@Constraint(validatedBy = NonZeroValidator.class)
+@Target({ ElementType.FIELD, ElementType.RECORD_COMPONENT, ElementType.PARAMETER })
+@Retention(RetentionPolicy.RUNTIME)
+public @interface NonZero {
+    String message() default "值不能为0";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
+
+public class NonZeroValidator implements ConstraintValidator<NonZero, Number> {
+    @Override
+    public boolean isValid(Number value, ConstraintValidatorContext context) {
+        return value == null || value.longValue() != 0L;
+    }
+}
+```
+
+#### 3.5.2 在 CommandBus 中调用 Validator
+
+在前文的 `CommandBus` 中加入 Validator，`send` 时先做校验：
+
+```java
+import org.springframework.core.ResolvableType;
+
+@Component
+public class CommandBus {
+    private final Map<Class<?>, CommandHandler<?, ?>> registry;
+    private final jakarta.validation.Validator validator;
+
+    public CommandBus(List<CommandHandler<?, ?>> handlers,
+                      jakarta.validation.Validator validator) {
+        this.validator = validator;
+        Map<Class<?>, CommandHandler<?, ?>> map = new HashMap<>();
+        for (CommandHandler<?, ?> h : handlers) {
+            Class<?> cmdType = ResolvableType
+                .forClass(CommandHandler.class, h.getClass())
+                .resolveGeneric(0);
+            if (cmdType == null) {
+                throw new IllegalStateException("无法解析命令类型: " + h.getClass());
+            }
+            if (map.putIfAbsent(cmdType, h) != null) {
+                throw new IllegalStateException("命令处理器重复: " + cmdType.getName());
+            }
+        }
+        this.registry = Map.copyOf(map);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <R, C extends Command<R>> R send(C command) {
+        // 1) Bean Validation
+        Set<ConstraintViolation<C>> violations = validator.validate(command);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
+
+        // 2) 分发
+        CommandHandler<C, R> handler = (CommandHandler<C, R>) registry.get(command.getClass());
+        if (handler == null) {
+            throw new IllegalStateException("未找到命令处理器: " + command.getClass().getSimpleName());
+        }
+        return handler.handle(command);
+    }
+}
+```
+
+这样即可保证“任何通过 CommandBus 发送的命令”都先被自动校验，违规时抛出 `ConstraintViolationException`。
+
+#### 3.5.3 异常到 HTTP 的映射
+
+为了让前端收到友好的 400 响应，可在接口层统一拦截 `ConstraintViolationException`：
+
+```java
+@RestControllerAdvice
+public class ValidationExceptionHandler {
+    @ExceptionHandler(ConstraintViolationException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Map<String, Object> handle(ConstraintViolationException ex) {
+        List<Map<String, String>> errors = ex.getConstraintViolations().stream()
+            .map(v -> Map.of(
+                "field", v.getPropertyPath().toString(),
+                "message", v.getMessage()
+            ))
+            .toList();
+        return Map.of("code", "VALIDATION_ERROR", "errors", errors);
+    }
+}
+```
+
+如果你的 Controller 入参已经使用 `@Valid` 做了一轮校验，保持“轻校验在 Controller、规则校验在命令对象”也未尝不可；但将“命令的语义约束”归并在命令本体更清晰，也能覆盖“非 HTTP 场景（消息、批处理）”。
+
+#### 3.5.4 装饰器/中间件式 CommandBus（可插拔）
+
+若不想修改现有 `CommandBus` 实现，可以用装饰器把验证作为一个中间层：
+
+```java
+public interface ICommandBus {
+    <R, C extends Command<R>> R send(C command);
+}
+
+@Component("simpleCommandBus")
+public class SimpleCommandBus implements ICommandBus { /* 采用 3.2.2 的反射注册实现 */ }
+
+@Primary
+@Component
+public class ValidatingCommandBus implements ICommandBus {
+    private final ICommandBus next;
+    private final jakarta.validation.Validator validator;
+
+    public ValidatingCommandBus(@Qualifier("simpleCommandBus") @Lazy ICommandBus next,
+                                jakarta.validation.Validator validator) {
+        this.next = next;
+        this.validator = validator;
+    }
+
+    @Override
+    public <R, C extends Command<R>> R send(C command) {
+        Set<ConstraintViolation<C>> violations = validator.validate(command);
+        if (!violations.isEmpty()) throw new ConstraintViolationException(violations);
+        return next.send(command);
+    }
+}
+```
+
+这种方式便于继续叠加更多中间件，例如 `AuthorizingCommandBus`、`LoggingCommandBus`，形成责任链。
+
+#### 3.5.5 测试：独立验证命令
+
+```java
+@Test
+void adjustInventoryCommand_should_fail_when_quantity_is_zero() {
+    Validator validator = Validation.buildDefaultValidatorFactory().getValidator();
+    AdjustInventoryCommand cmd = new AdjustInventoryCommand(UUID.randomUUID(), 0, "WH-01", "test");
+    Set<ConstraintViolation<AdjustInventoryCommand>> v = validator.validate(cmd);
+    assertFalse(v.isEmpty());
+}
+```
+
+至此，我们已经把“命令验证”功能完整实现了。
+
+### 3.6 小结：命令模式把问题**全部**解决了吗？
+
+在小结之前，笔者想先申明一项观点：推动开发者们开始反对传统 MVC 架构，研究 DDD 的驱动力是什么？如果列举一个评测表格，DDD 不见得在各种场景下都优于 MVC 架构，甚至我们完全可以下一个论断：在这世界上绝大多数的中小型项目中，MVC 架构远比 DDD 架构更合适。真正在推动 DDD 兴起的动力，是**大型**乃至**超大型**项目的开发需求，这些项目有着极其复杂的业务逻辑和庞大的代码基数，没有任何开发者可以做到以一己之力对整个项目的业务逻辑了如指掌，为此必须通过架构设计**降低开发者的心智负担**，能交给架构解决的问题，就绝不让开发者去解决。
+
+命令模式的引入解决了我们在第一章看到的诸多问题，如果说哪个问题的解决是最具价值的，笔者认为是“阻止开发者在 Controller 里写业务逻辑”这一点。优秀的架构设计，应该能让开发者自然而然地遵守架构规则，而不是靠代码审查和团队规范来强制执行，如果一件事不应该被做，那么架构设计就应该让这件事变得“不可能”去做。命令模式的引入，彻底切断了 Controller 和业务逻辑层的直接依赖关系，开发者在 Controller 里根本无法调用业务逻辑代码，从而杜绝了在 Controller 里写业务逻辑的可能性。
+
+但当我们一一对照第一章列出的问题清单时，会发现仍有一项问题没有解决：查询操作和命令操作的区别。我们当然可以写一些查询命令和相应的命令处理器，然后再把查询结果发回给 Controller，这种方式当然简单、清晰、具有逻辑一致性，对于简单项目非常合理。但在真实业务中，我们是可以预见我们需要处理什么状况的：随着用户的增多，数据量的增大，性能问题会逐渐显现出来，查询操作的性能优化需求会越来越多，最终我们会发现查询操作和命令操作的优化方式完全不同，查询操作需要缓存、只读副本、异步加载等技术，而命令操作则需要事务、一致性保证等技术。到那时，为了分别对查询和命令进行优化，我们最好将查询操作和命令操作彻底分离开来，形成 CQRS（Command Query Responsibility Segregation，命令查询职责分离）——因为这个时候，在查询和命令混杂在一起的情况下做优化所导致的复杂性，已经远远超过了使用 CQRS 所带来的复杂性。
+
+然而“积重难返”这件事并不只是说说而已，当一个项目已经使用传统 MVC 架构开发了多年，代码基数已经非常庞大时，贸然引入 CQRS 只会带来更大的混乱，当业务尚未停滞时，开发者根本没有时间和精力去重构整个项目的架构。因此，要在项目中引入 CQRS，最好的时间点只有一个：立项之初。而这时，架构师要向团队解释的问题，就变成了为什么要在业务尚不复杂时引入CQRS，导致架构复杂性的增加。而答案是清晰明确的：**应对未来的复杂性**。
+
+本文无意详解 CQRS，很多文档教程已经对 CQRS 有非常详尽的介绍，比如[ Microsoft Azure Global Edition 技术文档-云设计模式-CQRS](https://learn.microsoft.com/zh-cn/azure/architecture/patterns/cqrs)，笔者只希望说明一点：相比其他的设计模式，CQRS 在从 MVC 到 DDD 架构的过程中优先级非常高，高到甚至应该代替命令模式，成为本文的前三章的内容。但在引入命令模式之前改用 CQRS，在代码上并不会产生太大的差异，这会导致读者对CQRS产生错误的“意义不大”的第一印象，因此本文选择了先引入命令模式，再引入 CQRS。
+
+## 第四章：CQRS - 读写职责分离
+
+
+### 4.11 下一步
+
+我们通过四个章节，将 Service 重构为“以用例为单位的应用服务（命令处理器）”，所有“命令”型操作都以接口层创建命令->发送命令->命令总线做验证、发日志、存记录等等等等->命令处理器执行业务逻辑的流程完成，所有“查询”型操作则变成了一个 QueryService ，还是经典而好用的 MVC 查询模式。
 
 另外，我们大幅瘦身了 Controller ，也彻底阻止了在 Controller 里写业务逻辑的坏习惯。
 
 此刻，开发者拿到业务，并编写接口与业务逻辑的部分，已经变得更加轻松。下一章，我们将开始攻关基础设施层，并推进 code-first 为我们带来的愿景：不写 SQL！
 
-### 3.12 当前边界
+### 4.12 当前边界
 
 - 本文当前阶段仅完成“用例编排瘦身 + 命令/处理器/总线”的过渡性改造，与标准 DDD（聚合、领域事件驱动、边界上下文）相去甚远；
 - CQRS 目前仅体现了“读写职责分离”的基本思路，距离读模型独立优化（缓存/只读副本/多存储）的完整形态万里之遥；
