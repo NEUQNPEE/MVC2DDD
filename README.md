@@ -43,6 +43,16 @@
       - [3.8.1 所谓的"复用"往往是伪命题](#381-所谓的复用往往是伪命题)
       - [3.8.2 软件工程的复杂度治理](#382-软件工程的复杂度治理)
   - [第四章：CQRS - 读写职责分离](#第四章cqrs---读写职责分离)
+    - [4.1 读写不对称的现实](#41-读写不对称的现实)
+    - [4.2 什么是 CQRS？](#42-什么是-cqrs)
+    - [4.3 演进：查询侧的重构](#43-演进查询侧的重构)
+      - [4.3.1 第一步：定义查询对象（Query）](#431-第一步定义查询对象query)
+      - [4.3.2 第二步：定义读模型（Read Model / DTO）](#432-第二步定义读模型read-model--dto)
+      - [4.3.3 第三步：实现查询处理器（Query Handler）](#433-第三步实现查询处理器query-handler)
+    - [4.4 为什么查询侧要“绕过”领域模型？](#44-为什么查询侧要绕过领域模型)
+    - [4.5 架构图的再次演进](#45-架构图的再次演进)
+    - [4.6 进阶：物理分离](#46-进阶物理分离)
+    - [4.7 小结](#47-小结)
 <!-- /TOC -->
 
 ## 适用人群
@@ -1068,9 +1078,11 @@ public void updateUser(User user, boolean isAdmin, boolean sendEmail, boolean ch
 在传统的水平分层架构中，Controller 可以调用任意 Service，Service 之间也可以互相调用。这种 **N对N 的网状依赖关系**，就像一个没有部门划分的大型企业：每个人都需要和所有人沟通才能完成工作。当企业规模扩大时，沟通成本呈指数级上升，最终导致效率崩溃。
 
 软件工程的核心原则在于降低程序员的心智负担。程序员最大的心智负担，往往来自于“协调不在自己职责内的代码”。如果我们的职责划分清晰，我们完全可以让开发者专注于处理 **一个业务 对 一个处理器** 这样 **1 对 1** 的关系，让框架处理 **一个业务 对 多个副作用** 这样 **1 对 n** 的关系。命令模式配合这种切片化的思想，将开发者的工作简化为处理 **1 对 1** 的关系：
+
 - 一个 Request 对应 一个 Command
 - 一个 Command 对应 一个 Handler
 - 一个 Handler 对应 一个具体的业务逻辑
+
 而那些复杂的 **1 对 N** 关系（如一个命令触发多个副作用、日志、监控、事务管理），则全部交给**框架**（CommandBus/Mediator）来处理。
 
 通过这种方式，我们彻底杜绝了业务代码之间 N对N 的混乱关系，将软件工程的复杂度控制在常数级别。
@@ -1080,3 +1092,172 @@ public void updateUser(User user, boolean isAdmin, boolean sendEmail, boolean ch
 **总结：** 不要被文件数量的表象迷惑。命令模式是用"空间的增加"换取了"逻辑的解耦"和"认知的清晰"。
 
 ## 第四章：CQRS - 读写职责分离
+
+前面已经提过，本文无意详解 CQRS，因此本章将专注于在代码中实现 CQRS ,而对 CQRS 的理论基础一笔带过。
+
+### 4.1 读写不对称的现实
+
+在第一章中，我们提到了 `ProductService` 中混杂了 `adjustInventory`（写）和 `getProductById`（读）两种截然不同的操作。在引入命令模式后，我们已经将“写操作”剥离为独立的 Command 和 Handler。现在，让我们回头看看剩下的“读操作”。
+
+在传统 MVC 中，开发这习惯把实体类（Entity）当内存里的数据库表使用，一整个加载入内存，然后按需读写字段：
+
+```java
+// 既是业务对象，又是数据传输对象（DTO）
+@Entity
+public class Product {
+    @Id
+    private UUID id;
+    private String name;
+    private Integer stock;
+    // ... 其他字段
+}
+```
+
+这种“一杆子捅到底”的做法在简单 CRUD 场景下很高效，但在复杂业务中会带来严重问题：
+
+1.  **字段泄露**：实体类中可能包含敏感数据（如成本价、乐观锁版本号），不应该直接暴露给前端。
+2.  **性能陷阱**：为了展示一个列表，可能触发 N+1 查询，或者加载了大量不需要的关联对象（如查询订单列表时加载了所有订单项）。
+3.  **模型失配**：前端需要的展示格式（如“2023-10-01”）和数据库存储格式（Timestamp）往往不同，导致 Entity 里充斥着大量的 getter/setter 转换逻辑或 Jackson 注解。
+
+### 4.2 什么是 CQRS？
+
+CQRS（Command Query Responsibility Segregation）的核心思想非常简单：**将系统的“读”和“写”操作分成两个独立的模型来处理。**
+
+-   **Command（写侧）**：负责执行业务逻辑，改变系统状态。关注数据的一致性、事务、业务规则。
+-   **Query（读侧）**：负责获取数据，不改变系统状态。关注查询性能、数据格式、用户体验。
+
+### 4.3 演进：查询侧的重构
+
+让我们像处理命令一样，对查询操作进行标准化。
+
+#### 4.3.1 第一步：定义查询对象（Query）
+
+查询对象和命令对象类似，也是一个纯粹的数据载体，但它表达的是“我想看什么”。
+
+```java
+/**
+ * 查询产品详情
+ * 泛型 ProductDto 指定了期望的返回类型
+ */
+public record GetProductByIdQuery(UUID productId) implements Query<ProductDto> {}
+
+/**
+ * 查询产品列表（带分页）
+ */
+public record SearchProductsQuery(
+    String keyword,
+    BigDecimal minPrice,
+    BigDecimal maxPrice,
+    int page,
+    int size
+) implements Query<Page<ProductSummaryDto>> {}
+```
+
+#### 4.3.2 第二步：定义读模型（Read Model / DTO）
+
+读模型是专门为视图层设计的，它应该只包含数据，不包含业务逻辑。
+
+```java
+// 详情视图：包含完整信息
+public record ProductDto(
+    UUID id, 
+    String name, 
+    String description, 
+    Integer stock, 
+    BigDecimal price
+) {}
+
+// 列表视图：只包含摘要信息
+public record ProductSummaryDto(
+    UUID id, 
+    String name, 
+    BigDecimal price
+) {}
+```
+
+#### 4.3.3 第三步：实现查询处理器（Query Handler）
+
+这是 CQRS 与传统分层架构最大的不同点。在写侧（Command Handler），我们需要通过 Repository 加载聚合根（Entity），执行业务逻辑，然后保存。
+
+但在读侧（Query Handler），**我们不需要加载 Entity！**
+
+既然只是为了读取数据展示给用户，我们完全可以把设计压缩到极限的简洁：直接用 SQL 查询，跳过一切业务逻辑，跟数据库直接直接交互，映射为 DTO。如果你查看Wow框架在这部分的设计，其简洁性甚至更进一步：它的查询url直接让前端传入查询用的DSL！
+
+这部分的设计为何如此大胆？因为由于读写分离，读侧的代码不需要考虑任何事务、一致性或者其他等等业务问题，因此可以肆无忌惮地进行各种性能优化。
+
+```java
+public class ProductQueryController {
+    // 非常激进的设计：直接在 Controller 里写 SQL 查询
+    private final JdbcTemplate jdbcTemplate;
+
+    public ProductQueryController(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    @GetMapping("/api/products/{id}")
+    public ProductDto getProductById(@PathVariable UUID id) {
+        String sql = "SELECT id, name, description, stock, price FROM products WHERE id = ?";
+        return jdbcTemplate.queryForObject(sql, new Object[]{id}, (rs, rowNum) -> new ProductDto(
+            UUID.fromString(rs.getString("id")),
+            rs.getString("name"),
+            rs.getString("description"),
+            rs.getInt("stock"),
+            rs.getBigDecimal("price")
+        ));
+    }
+}
+```
+
+### 4.4 为什么查询侧要“绕过”领域模型？
+
+很多开发者会有疑问：“直接用 SQL 查 DTO，是不是破坏了封装？是不是没有用上 DDD 的聚合根？”
+
+**答案是：查询侧不需要领域模型。**
+
+领域模型（Entity/Aggregate）存在的唯一目的，是**保护业务不变量（Invariants）**。比如“库存不能小于0”、“订单总额必须等于明细之和”。这些规则只有在**修改数据**时才需要校验。
+
+当你只是**读取数据**时，数据已经是持久化在数据库中的“事实”了，你不需要校验它，你只需要把它取出来。也就是说，读操作不会造成系统状态的任何更改，因此应该略过一切业务逻辑，直接获取数据。
+
+### 4.5 架构图的再次演进
+
+引入 CQRS 后，我们的架构变成了这样：
+
+```mermaid
+graph TD
+    User --> Controller
+    
+    subgraph Command Side [写侧：一致性优先]
+        Controller -->|Send Command| CommandBus
+        CommandBus --> CommandHandler
+        CommandHandler -->|Load| Repository
+        Repository -->|Save| DB[(Database)]
+    end
+
+    subgraph Query Side [读侧：性能优先]
+        User --> QueryController
+        QueryController -->|Direct SQL| DB
+    end
+```
+
+当然，以上的设计只是基本骨架，你完全可以根据实际需求加入各种中间层。
+
+### 4.6 进阶：物理分离
+
+在更复杂的场景下，CQRS 允许我们将读写模型在物理存储上也分离开来：
+
+*   **写库**：使用规范化设计的关系型数据库（MySQL/PostgreSQL），保证 ACID。
+*   **读库**：使用反规范化的 NoSQL（MongoDB/Elasticsearch），保证查询性能。
+*   **同步**：通过领域事件（Domain Events）异步将写库的数据同步到读库。
+
+这虽然增加了系统的复杂性（最终一致性），但它赋予了系统极高的扩展性。不过，对于大多数单体应用，**代码层面的 CQRS（逻辑分离，共享数据库）** 已经能带来 90% 的收益：清晰的代码结构和针对性的性能优化。
+
+### 4.7 小结
+
+通过第四章，我们完成了架构演进的关键一步：
+
+*   **Command** 封装了“更改状态的意图”，让我们专注于业务规则的执行。
+*   **Query** 封装了“读取状态的意图”，让我们专注于数据的获取和展示。
+
+现在，我们的 Controller 变得异常轻量，Service 层消失了（变成了 Handler），Repository 变得纯粹。但还有一个问题悬而未决：**业务逻辑到底该写在哪里？**
+
+令笔者犹豫的是，业务逻辑怎么写，在哪里写是一个不适合在“指导性文章”中讨论的问题，因为这涉及到每个项目的具体业务场景和团队习惯。而考虑再三，笔者决定分两步走：首先将读者需要了解的一切DDD相关术语在第五章预先定义清晰。读者可能会觉得这又变成了和其他DDD教程一样冗长而不明就里的术语解释环节，但笔者要率先澄清：笔者不当无情的翻译机器，笔者是要重新建构理论体系：读者必须在只知道自己应该知道的，不知道自己不该知道的情况下，才能最高效的吸收知识。第五章的内容，笔者将会构造出从零基础一步迈进现代DDD战术落地的最小核心理论体系。而第六章，将会是笔者自己的经验结晶，其应用性比较强，读者可以根据自己的实际情况取舍。
