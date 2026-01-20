@@ -1225,6 +1225,7 @@ public class ProductQueryController {
 ```mermaid
 graph TD
     User --> Controller
+    User --> QueryController
     
     subgraph Command Side [写侧：一致性优先]
         Controller -->|Send Command| CommandBus
@@ -1234,7 +1235,6 @@ graph TD
     end
 
     subgraph Query Side [读侧：性能优先]
-        User --> QueryController
         QueryController -->|Direct SQL| DB
     end
 ```
